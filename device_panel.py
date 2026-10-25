@@ -15,6 +15,13 @@ PANEL_HTML = Path(__file__).with_name("panel.html")
 HISTORY_LIMIT = 200
 
 
+class _QuietServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        pass  # Browsers drop keep-alive sockets routinely; don't spray tracebacks on the router console
+
+
 class DevicePanel:
     def __init__(self, host: str = "127.0.0.1", port: int = 8765):
         self.host = host
@@ -49,11 +56,10 @@ class DevicePanel:
                     self.send_error(404)
 
         try:
-            self._server = ThreadingHTTPServer((self.host, self.port), Handler)
+            self._server = _QuietServer((self.host, self.port), Handler)
         except OSError:
             # Preferred port busy -> let the OS pick a free one
-            self._server = ThreadingHTTPServer((self.host, 0), Handler)
-        self._server.daemon_threads = True
+            self._server = _QuietServer((self.host, 0), Handler)
         self.port = self._server.server_address[1]
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
@@ -107,7 +113,8 @@ class DevicePanel:
                 "type": "escalation",
                 "reason": payload.get("abstention_reason"),
                 "engine": out.get("engine"),
-                "diagnosis": out.get("diagnosis", ""),
+                "mode": out.get("mode", "diagnosis"),
+                "diagnosis": out.get("report") or out.get("diagnosis", ""),
             }
         ev.update(prompt=res.prompt, tier=res.tier_selected, latency_ms=res.latency_ms, ts=time.time())
 

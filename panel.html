@@ -181,7 +181,7 @@
 
   <div class="row2">
     <section class="card" id="brain">
-      <h2>Big Brain · Tier 2 Diagnosis</h2>
+      <h2 id="brain-title">Big Brain · Tier 2 Diagnosis</h2>
       <div id="brain-meta"></div>
       <div id="brain-text" class="empty">No escalations yet.</div>
     </section>
@@ -360,12 +360,14 @@
         addLog(ev, `unknown tool ${cmd.tool}`);
       }
     } else if (ev.type === "escalation") {
+      const isReport = ev.mode === "report";
       $("brain").classList.add("active");
+      $("brain-title").textContent = `Big Brain · Tier 2 ${isReport ? "Status Report" : "Diagnosis"}`;
       $("brain-meta").textContent = `${ev.engine || "Tier 2"} · ${Math.round(ev.latency_ms)} ms · ${ev.reason || ""}`;
       $("brain-text").className = "";
       $("brain-text").textContent = `> ${ev.prompt}\n\n${(ev.diagnosis || "").trim() || "No diagnosis returned."}`;
       if (live) flash("brain");
-      addLog(ev, "escalated to Big Brain");
+      addLog(ev, isReport ? "status report generated" : "escalated to Big Brain");
     }
   }
 
