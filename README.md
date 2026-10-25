@@ -15,6 +15,7 @@ prompt
   │
   ├─ diagnostic keywords? (diagnose, why, vibration, smoke, …) ──────────► Tier 2 · diagnosis
   ├─ report keywords? (report, status, summary, overview, sitrep) ───────► Tier 2 · status report
+  ├─ question about device state? ("is the motor steady? what's the rpm?") ► Tier 2 · answer
   │
   ├─ Tier 1 · FunctionGemma 270M picks a tool
   │     emergency_stop / set_motor_speed / read_sensor ──────────────────► command
@@ -27,9 +28,9 @@ prompt
 | Tier | Engine | Handles | Fallback |
 |---|---|---|---|
 | **1 · Small Brain** | FunctionGemma 270M Q8 (LiteRT-LM, CPU, in-process) | `emergency_stop`, `set_motor_speed(rpm)`, `read_sensor(sensor_id)` | Keyword and regex matching |
-| **2 · Big Brain** | `gemma4:e4b` via Ollama `/api/chat` | Diagnoses and status reports | Canned diagnosis, or a report built from the tracked device state |
+| **2 · Big Brain** | `gemma4:e4b` via Ollama `/api/chat` | Diagnoses, status reports and questions about device state | States that the Big Brain is unavailable and why (offline, timeout); reports and questions also show the tracked device state |
 
-Tier 1 never executes the tools. It returns a validated Pydantic command object. The router tracks simulated device state (motor setpoint, e-stop, sensor reads, recent commands), and that state is what a Tier 2 report summarizes.
+Tier 1 never executes the tools. It returns a validated Pydantic command object. The router tracks simulated device state (motor setpoint, e-stop, sensor reads, recent commands), and that state is what Tier 2 reports and answers are based on. A question is never turned into a device action. Ollama calls time out after 90 s.
 
 ## Setup
 
@@ -46,7 +47,7 @@ python verify_env.py                  :: checks Python, packages, LiteRT and Oll
 - **Tier 1:** download `mobile_actions_q8_ekv1024.litertlm` from [litert-community/functiongemma-270m-ft-mobile-actions](https://huggingface.co/litert-community/functiongemma-270m-ft-mobile-actions). The repo is gated, so you need to accept the Gemma license first. Save it to `models/functiongemma-270m/`. The path is currently hardcoded in `TieredRouter.__init__`; edit it if your checkout lives somewhere other than `C:\aiw\gemma-tiered`.
 - **Tier 2:** `ollama pull gemma4:e4b`, then make sure `ollama serve` is running.
 
-Both tiers degrade gracefully. Without the LiteRT model, Tier 1 uses regex matching. Without Ollama, Tier 2 uses its synthetic fallback. The startup line tells you which engines are active:
+Both tiers degrade gracefully. Without the LiteRT model, Tier 1 uses regex matching. Without Ollama, Tier 2 says it is unavailable rather than inventing an answer, and reports fall back to the tracked device state. The startup line tells you which engines are active:
 
 ```
 Tier 1: LiteRT-LM FunctionGemma 270M Q8 (loaded)  |  Tier 2: Ollama gemma4:e4b (online @ http://127.0.0.1:11434)
@@ -70,6 +71,7 @@ Set primary motor to 1400 RPM
 Read sensor temp_01
 Emergency halt right now
 give me a status report
+is the motor steady? what is the rpm?
 Why is the conveyor belt slipping whenever torque demand exceeds 45Nm?
 ```
 
@@ -81,7 +83,7 @@ Why is the conveyor belt slipping whenever torque demand exceeds 45Nm?
 - **Thermometer and pressure gauge:** readings rise with motor speed. They are simulated values, not real hardware.
 - **Linear actuator:** cycles while the motor runs.
 - **E-stop:** shows a flashing banner and halts everything. Commanding a new speed clears it, which is demo behavior; a real e-stop stays latched until reset.
-- **Big Brain card:** shows Tier 2 diagnoses and reports.
+- **Big Brain card:** shows Tier 2 diagnoses, reports and answers.
 - **Command log:** lists each prompt with a T1 or T2 badge and its latency.
 
 The panel uses only the Python standard library and a single self-contained HTML file, with no external dependencies.

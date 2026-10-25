@@ -360,14 +360,19 @@
         addLog(ev, `unknown tool ${cmd.tool}`);
       }
     } else if (ev.type === "escalation") {
-      const isReport = ev.mode === "report";
+      const MODES = {
+        report: ["Status Report", "status report generated"],
+        question: ["Answer", "question answered"],
+        diagnosis: ["Diagnosis", "escalated to Big Brain"],
+      };
+      const [title, logText] = MODES[ev.mode] || MODES.diagnosis;
       $("brain").classList.add("active");
-      $("brain-title").textContent = `Big Brain · Tier 2 ${isReport ? "Status Report" : "Diagnosis"}`;
+      $("brain-title").textContent = `Big Brain · Tier 2 ${title}`;
       $("brain-meta").textContent = `${ev.engine || "Tier 2"} · ${Math.round(ev.latency_ms)} ms · ${ev.reason || ""}`;
       $("brain-text").className = "";
       $("brain-text").textContent = `> ${ev.prompt}\n\n${(ev.diagnosis || "").trim() || "No diagnosis returned."}`;
       if (live) flash("brain");
-      addLog(ev, isReport ? "status report generated" : "escalated to Big Brain");
+      addLog(ev, logText);
     }
   }
 

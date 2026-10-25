@@ -113,7 +113,7 @@ class DevicePanel:
                 "type": "escalation",
                 "reason": payload.get("abstention_reason"),
                 "engine": out.get("engine"),
-                "mode": out.get("mode", "diagnosis"),
+                "mode": out.get("mode", "diagnosis"),  # diagnosis | report | question
                 "diagnosis": out.get("report") or out.get("diagnosis", ""),
             }
         ev.update(prompt=res.prompt, tier=res.tier_selected, latency_ms=res.latency_ms, ts=time.time())

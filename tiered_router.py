@@ -13,9 +13,10 @@ import sys
 import os
 import time
 import json
+import math
 import re
 import statistics
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 # Ensure UTF-8 output on Windows terminals
 if sys.platform == "win32":
@@ -41,6 +42,12 @@ except ImportError:
     Table = None
     Panel = None
     box = None
+
+
+# Simulated motor ramp rates (1/s), matching panel.html: ~95% of a speed change within 2.5 s,
+# e-stop spin-down within ~0.75 s
+RAMP_RATE = 1.2
+RAMP_RATE_ESTOP = 4.0
 
 
 # ============================================================================
@@ -82,7 +89,7 @@ class TieredRouter:
         self.ollama_available = self._check_ollama()
 
         # Simulated device state, updated by Tier 1 commands and summarized by Tier 2 reports
-        self.device_state = {"motor_target_rpm": 0, "estop": False, "sensor_reads": {}}
+        self.device_state = {"motor_target_rpm": 0, "estop": False, "sensor_reads": {}, "ramp": None}
         self.event_log: List[Dict[str, Any]] = []
 
         # Initialize LiteRT-LM Engine for Tier 1 (FunctionGemma 270M)
@@ -139,7 +146,7 @@ class TieredRouter:
         if self.ollama_available:
             tier2 = f"Ollama {self.ollama_model} (online @ {self.ollama_url})"
         else:
-            tier2 = "synthetic fallback (Ollama offline)"
+            tier2 = "unavailable (Ollama offline; reports use tracked state)"
         return f"Tier 1: {tier1}  |  Tier 2: {tier2}"
 
     def _check_ollama(self) -> bool:
@@ -176,6 +183,19 @@ class TieredRouter:
                 "escalate": True,
                 "mode": "report",
                 "reason": "Status report requested; Big Brain summarizes current device state."
+            }
+
+        # Questions about current device state -> Big Brain answers from telemetry (never actuates)
+        is_question = "?" in prompt_lower or re.match(
+            r"(what|what's|whats|how|is|are|was|does|did|has|can|tell me|show me)\b", prompt_lower)
+        is_imperative = re.match(r"(set|adjust|change|increase|decrease|stop|halt|read|run|start)\b", prompt_lower)
+        mentions_device = re.search(
+            r"\b(motor|rpm|speed|temp\w*|pressure|sensor|actuator|e-?stop|running|steady|stable|state)\b", prompt_lower)
+        if is_question and mentions_device and not is_imperative:
+            return {
+                "escalate": True,
+                "mode": "question",
+                "reason": "Operator question about device state; Big Brain answers from telemetry."
             }
 
         # 1. Neural Function Calling with LiteRT-LM (FunctionGemma 270M)
@@ -255,10 +275,11 @@ class TieredRouter:
             "reason": "Unrecognized reflex command syntax; strictly abstaining to prevent unintended device actuation."
         }
 
-    def _ollama_chat(self, system: str, user: str, num_predict: int = 250, timeout: float = 30.0) -> Optional[str]:
-        """Single-turn Ollama chat call; returns None if Ollama is unavailable or fails."""
+    def _ollama_chat(self, system: str, user: str, num_predict: int = 250,
+                     timeout: float = 90.0) -> Tuple[Optional[str], Optional[str]]:
+        """Single-turn Ollama chat call. Returns (text, None) on success or (None, error) on failure."""
         if not (self.ollama_available and requests is not None):
-            return None
+            return None, "Ollama offline"
         try:
             payload = {
                 "model": self.ollama_model,
@@ -271,23 +292,38 @@ class TieredRouter:
                 "options": {"temperature": 0.1, "num_predict": num_predict}
             }
             resp = requests.post(f"{self.ollama_url}/api/chat", json=payload, timeout=timeout)
-            if resp.status_code == 200:
-                msg = resp.json().get("message", {})
-                text = msg.get("content", "").strip() or msg.get("thinking", "").strip()
-                return text or None
-        except Exception:
-            pass  # Caller falls back to its synthetic response
-        return None
+            if resp.status_code != 200:
+                return None, f"Ollama returned HTTP {resp.status_code}"
+            msg = resp.json().get("message", {})
+            text = msg.get("content", "").strip() or msg.get("thinking", "").strip()
+            return (text, None) if text else (None, "Ollama returned an empty response")
+        except requests.Timeout:
+            return None, f"Ollama timed out after {timeout:.0f} s"
+        except Exception as e:
+            return None, f"Ollama request failed: {type(e).__name__}"
+
+    def _motor_rpm_now(self) -> float:
+        """Estimated actual motor speed: exponential ramp toward the setpoint (same model as the panel)."""
+        ramp = self.device_state["ramp"]
+        if ramp is None:
+            return 0.0
+        dt = time.monotonic() - ramp["t0"]
+        return ramp["to"] + (ramp["from"] - ramp["to"]) * math.exp(-ramp["rate"] * dt)
+
+    def _start_ramp(self, to_rpm: float, rate: float) -> None:
+        self.device_state["ramp"] = {"from": self._motor_rpm_now(), "to": to_rpm, "rate": rate, "t0": time.monotonic()}
 
     def _apply_command(self, cmd: Dict[str, Any]) -> None:
         """Update the simulated device state from a Tier 1 command."""
         tool = cmd.get("tool")
         if tool == "emergency_stop":
             self.device_state["estop"] = True
+            self._start_ramp(0, RAMP_RATE_ESTOP)
         elif tool == "set_motor_speed":
             # Commanding a speed clears the e-stop (demo behavior, mirrors the device panel)
             self.device_state["estop"] = False
             self.device_state["motor_target_rpm"] = max(0, int(cmd.get("rpm", 0)))
+            self._start_ramp(self.device_state["motor_target_rpm"], RAMP_RATE)
         elif tool == "read_sensor":
             reads = self.device_state["sensor_reads"]
             sid = cmd.get("sensor_id", "")
@@ -295,19 +331,28 @@ class TieredRouter:
 
     def _status_snapshot(self) -> Dict[str, Any]:
         """Telemetry handed to the Big Brain for reports (same physics as the device panel)."""
-        rpm = self.device_state["motor_target_rpm"]
+        setpoint = self.device_state["motor_target_rpm"]
         estop = self.device_state["estop"]
-        running = not estop and rpm > 0
-        eff_rpm = rpm if running else 0
+        effective_setpoint = 0 if estop else setpoint
+        current = self._motor_rpm_now()
+        at_setpoint = abs(current - effective_setpoint) <= max(5.0, 0.01 * effective_setpoint)
+        running = current > 5
         return {
             "overall": "E-STOP ENGAGED" if estop else ("RUNNING" if running else "IDLE"),
             "emergency_stop_latched": estop,
-            "motor": {"target_rpm": rpm, "running": running},
-            "actuator": "halted" if estop else ("cycling" if running else "idle"),
+            "motor": {
+                "setpoint_rpm": setpoint,
+                "estimated_current_rpm": round(current if not at_setpoint else effective_setpoint),
+                "at_setpoint": at_setpoint,
+                "ramping": not at_setpoint,
+                "running": running,
+                "note": "estimated actual speed from a simulated ramp model; no encoder attached"
+            },
+            "actuator": "halted" if estop else ("cycling" if current > 30 else "idle"),
             "estimated_readings": {
-                "temp_01_c": round(24 + eff_rpm * 0.025, 1),
-                "pressure_valve_B_bar": round(1 + eff_rpm * 0.0012, 2),
-                "note": "simulated steady-state estimates; no live hardware attached"
+                "temp_01_c": round(24 + current * 0.025, 1),
+                "pressure_valve_B_bar": round(1 + current * 0.0012, 2),
+                "note": "simulated estimates derived from motor speed; no live hardware attached"
             },
             "sensor_read_counts": dict(self.device_state["sensor_reads"]),
             "recent_activity": self.event_log[-10:],
@@ -327,7 +372,7 @@ class TieredRouter:
         recs = []
         if snap["emergency_stop_latched"]:
             recs.append("Investigate the e-stop cause before resuming; command a motor speed to clear it.")
-        if motor["target_rpm"] > 2000 and motor["running"]:
+        if motor["setpoint_rpm"] > 2000 and motor["running"]:
             recs.append("Motor above 2000 RPM; monitor temp_01 for thermal drift.")
         if est["temp_01_c"] > 80:
             recs.append("Estimated temperature above 80 °C; reduce speed.")
@@ -336,8 +381,9 @@ class TieredRouter:
 
         return (
             f"1. Overall Status: {snap['overall']}\n"
-            f"2. Motor & Actuators: target {motor['target_rpm']} RPM "
-            f"({'running' if motor['running'] else 'not running'}); actuator {snap['actuator']}; "
+            f"2. Motor & Actuators: running at ~{motor['estimated_current_rpm']} RPM "
+            f"(setpoint {motor['setpoint_rpm']} RPM, {'at setpoint' if motor['at_setpoint'] else 'ramping'}); "
+            f"actuator {snap['actuator']}; "
             f"e-stop {'LATCHED' if snap['emergency_stop_latched'] else 'clear'}.\n"
             f"3. Sensors: temp_01 ≈ {est['temp_01_c']} °C, pressure_valve_B ≈ {est['pressure_valve_B_bar']} bar "
             f"(simulated estimates). Reads so far: {reads}.\n"
@@ -355,18 +401,48 @@ class TieredRouter:
             "No preamble."
         )
         user = f"Request: {prompt}\n\nTelemetry:\n{json.dumps(snap, indent=2)}"
-        # Reports are longer than diagnoses; local E4B runs ~8 tok/s, so allow more time
-        text = self._ollama_chat(system, user, num_predict=300, timeout=90.0)
+        text, err = self._ollama_chat(system, user, num_predict=300)
         if text:
             return {"engine": f"Ollama ({self.ollama_model})", "mode": "report", "report": text, "telemetry": snap}
-        return {"engine": "Synthetic Report Builder", "mode": "report", "report": self._synthetic_report(snap), "telemetry": snap}
+        return {
+            "engine": "Tracked-State Report Builder (no model)",
+            "mode": "report",
+            "report": f"Big Brain unavailable ({err}); report built from tracked state.\n\n{self._synthetic_report(snap)}",
+            "telemetry": snap
+        }
+
+    def _tier2_question(self, prompt: str) -> Dict[str, Any]:
+        """Tier 2 question mode: answer an operator's question about the current device state."""
+        snap = self._status_snapshot()
+        system = (
+            "You are the plant's operations assistant. Answer the operator's question about the current device "
+            "state using the telemetry JSON.\n"
+            "- First sentence: the direct answer with the number and unit. For motor speed, quote "
+            "motor.estimated_current_rpm as the current speed and say whether it is at the setpoint or still "
+            "ramping toward motor.setpoint_rpm.\n"
+            "- Then 1-3 short sentences of context: whether the state is steady, anything noteworthy in recent "
+            "activity, and a next step only if one is warranted.\n"
+            "- All readings come from a simulation with no live hardware; mention that once, briefly.\n"
+            "- Never invent data that is not in the telemetry. No preamble, no quotation marks around values."
+        )
+        user = f"Question: {prompt}\n\nTelemetry:\n{json.dumps(snap, indent=2)}"
+        text, err = self._ollama_chat(system, user, num_predict=300)
+        if text:
+            return {"engine": f"Ollama ({self.ollama_model})", "mode": "question", "report": text, "telemetry": snap}
+        return {
+            "engine": "Tracked-State Report Builder (no model)",
+            "mode": "question",
+            "report": (f"Big Brain unavailable ({err}), so this question was not answered by a model. "
+                       f"Current tracked state:\n\n{self._synthetic_report(snap)}"),
+            "telemetry": snap
+        }
 
     def _tier2_reflection(self, prompt: str) -> Dict[str, Any]:
         """
-        Tier 2 Big Brain Reflection Engine (200-500 ms SLA).
-        Calls local Ollama if available, otherwise synthetic high-fidelity diagnostic response.
+        Tier 2 Big Brain Reflection Engine.
+        Calls local Ollama; if it is unavailable, says so rather than inventing a diagnosis.
         """
-        text = self._ollama_chat(
+        text, err = self._ollama_chat(
             "You are an industrial robotics diagnostics expert. Provide a concise, structured diagnosis "
             "identifying: 1. Failure Mode, 2. Root Cause, 3. Safe Action & Speed Limit.",
             prompt
@@ -377,14 +453,12 @@ class TieredRouter:
                 "diagnosis": text
             }
 
-        # High-fidelity synthetic fallback matching ~250ms reflection execution
-        time.sleep(0.24)  # Simulate typical 2B local inference time
         return {
-            "engine": "Synthetic Big Brain Engine (Gemma 4 E4B)",
-            "diagnosis": "Bearing inner race fatigue spallation (indicated by 120Hz harmonics at elevated thermal state). Throttle RPM to <= 450 RPM; schedule immediate bearing replacement.",
-            "failure_mode": "Bearing inner race fatigue spallation (indicated by 120Hz harmonics at elevated thermal state).",
-            "recommended_action": "Throttle RPM to <= 450 RPM; schedule immediate bearing replacement.",
-            "safety_override": True
+            "engine": "Big Brain unavailable",
+            "diagnosis": (
+                f"Big Brain unavailable ({err}); no diagnosis was produced. Tier 1 abstained, so no device "
+                "action was taken. Retry once Ollama is responsive (check with `ollama ps`)."
+            )
         }
 
     def _log_event(self, tier: str, prompt: str, result: str) -> None:
@@ -413,10 +487,14 @@ class TieredRouter:
                 expected_tier=expected_tier
             )
         
-        # Tier 1 Abstains -> Escalate to Tier 2 (report or diagnosis)
-        if tier1_out.get("mode") == "report":
+        # Tier 1 Abstains -> Escalate to Tier 2 (report, question, or diagnosis)
+        mode = tier1_out.get("mode")
+        if mode == "report":
             tier2_out = self._tier2_report(prompt)
             self._log_event("T2", prompt, "status report")
+        elif mode == "question":
+            tier2_out = self._tier2_question(prompt)
+            self._log_event("T2", prompt, "answered question")
         else:
             tier2_out = self._tier2_reflection(prompt)
             self._log_event("T2", prompt, "diagnosis")
@@ -564,7 +642,9 @@ def run_benchmark(debug: bool = False, panel=None):
     baseline_avg_t2 = statistics.mean(tier2_latencies) if tier2_latencies else 280.0
     baseline_total_ms = baseline_avg_t2 * total_calls
     actual_total_ms = sum(r.latency_ms for r in results)
-    latency_reduction_pct = max(0.0, ((baseline_total_ms - actual_total_ms) / baseline_total_ms) * 100.0)
+    latency_reduction_pct = (
+        max(0.0, ((baseline_total_ms - actual_total_ms) / baseline_total_ms) * 100.0) if baseline_total_ms > 0 else 0.0
+    )
 
     # Abstention verification rate (out of the 4 complex prompts, did all 4 abstain?)
     abstention_matches = sum(1 for r in results if (r.expected_tier == "Tier 2 (Big Brain)" and r.abstention_triggered))
