@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device Panel</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --card: #121922;
+    --card-edge: #1f2a37;
+    --text: #e6edf3;
+    --muted: #7d8b99;
+    --green: #2fe08b;
+    --amber: #ffb547;
+    --red: #ff4d5e;
+    --cyan: #3fd0ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: radial-gradient(ellipse at top, #142030 0%, var(--bg) 60%);
+    color: var(--text); font: 14px/1.4 "Segoe UI", system-ui, sans-serif; min-height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 16px 24px;
+    border-bottom: 1px solid var(--card-edge); background: rgba(11, 15, 20, 0.8);
+  }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .pill {
+    padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid currentColor;
+  }
+  .pill.ok { color: var(--green); }
+  .pill.bad { color: var(--red); }
+  #last-engine { margin-left: auto; color: var(--muted); font-size: 12px; }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 40px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--card-edge); border-radius: 14px;
+    padding: 16px; position: relative; overflow: hidden;
+  }
+  .card h2 {
+    margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--muted);
+    letter-spacing: 0.12em; text-transform: uppercase; display: flex; justify-content: space-between;
+  }
+  .card h2 code { color: var(--cyan); font-size: 12px; letter-spacing: 0; text-transform: none; }
+  .card svg { display: block; width: 100%; height: 190px; }
+  .readout {
+    font: 600 30px/1 "Cascadia Mono", Consolas, monospace; text-align: center; margin-top: 6px;
+    font-variant-numeric: tabular-nums;
+  }
+  .readout small { font-size: 14px; color: var(--muted); margin-left: 4px; }
+  .sub { text-align: center; color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+  .card.flash { animation: flash 0.9s ease-out; }
+  .card.flash-red { animation: flash-red 0.9s ease-out; }
+  @keyframes flash {
+    0% { box-shadow: 0 0 0 2px var(--cyan), 0 0 40px var(--cyan); }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  @keyframes flash-red {
+    0% { box-shadow: 0 0 0 2px var(--red), 0 0 50px var(--red); }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+
+  #estop {
+    display: none; margin-bottom: 16px; padding: 14px 18px; border-radius: 12px;
+    background: repeating-linear-gradient(45deg, #3a0a10, #3a0a10 18px, #55101a 18px, #55101a 36px);
+    border: 2px solid var(--red); color: #fff; font-weight: 700; letter-spacing: 0.15em;
+    text-align: center; animation: pulse 1s infinite alternate;
+  }
+  #estop.on { display: block; }
+  @keyframes pulse { from { box-shadow: 0 0 10px var(--red); } to { box-shadow: 0 0 36px var(--red); } }
+
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px; }
+  @media (max-width: 800px) { .row2 { grid-template-columns: 1fr; } }
+  #brain.active { border-color: var(--amber); box-shadow: 0 0 24px rgba(255, 181, 71, 0.25); }
+  #brain-text {
+    white-space: pre-wrap; max-height: 320px; overflow: auto; color: #f3e6cf;
+    font: 13px/1.5 "Cascadia Mono", Consolas, monospace;
+  }
+  #brain-meta { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  #log { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow: auto; }
+  #log li { padding: 8px 0; border-bottom: 1px solid var(--card-edge); display: grid; grid-template-columns: auto auto 1fr; gap: 10px; }
+  #log time { color: var(--muted); font: 12px Consolas, monospace; }
+  .tier { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 4px; height: fit-content; }
+  .tier.t1 { background: rgba(47, 224, 139, 0.15); color: var(--green); }
+  .tier.t2 { background: rgba(255, 181, 71, 0.15); color: var(--amber); }
+  #log .prompt { color: var(--text); }
+  #log .result { color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⚙ Tiered Router · Device Panel</h1>
+  <span id="conn" class="pill bad">connecting…</span>
+  <span id="last-engine"></span>
+</header>
+
+<main>
+  <div id="estop">⛔ EMERGENCY STOP ENGAGED · ALL ACTUATORS HALTED</div>
+
+  <div class="grid">
+    <!-- Motor -->
+    <section class="card" id="card-motor">
+      <h2>Primary Motor <code>set_motor_speed</code></h2>
+      <svg viewBox="0 0 200 190">
+        <defs>
+          <radialGradient id="hub" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#3a4a5c"/><stop offset="100%" stop-color="#18212c"/>
+          </radialGradient>
+        </defs>
+        <circle cx="100" cy="95" r="82" fill="none" stroke="#1f2a37" stroke-width="10"/>
+        <circle id="motor-ring" cx="100" cy="95" r="82" fill="none" stroke="var(--cyan)" stroke-width="3" opacity="0.2"/>
+        <g id="rotor" transform="rotate(0 100 95)">
+          <g fill="#2b3a4b" stroke="#4d6378" stroke-width="1.5">
+            <path d="M100 95 L96 22 Q100 16 104 22 Z"/>
+            <path d="M100 95 L96 22 Q100 16 104 22 Z" transform="rotate(60 100 95)"/>
+            <path d="M100 95 L96 22 Q100 16 104 22 Z" transform="rotate(120 100 95)"/>
+            <path d="M100 95 L96 22 Q100 16 104 22 Z" transform="rotate(180 100 95)"/>
+            <path d="M100 95 L96 22 Q100 16 104 22 Z" transform="rotate(240 100 95)"/>
+            <path d="M100 95 L96 22 Q100 16 104 22 Z" transform="rotate(300 100 95)"/>
+          </g>
+        </g>
+        <circle cx="100" cy="95" r="20" fill="url(#hub)" stroke="#4d6378"/>
+        <circle id="motor-led" cx="100" cy="95" r="5" fill="#334"/>
+      </svg>
+      <div class="readout"><span id="rpm">0</span><small>RPM</small></div>
+      <div class="sub">target <span id="rpm-target">0</span> RPM</div>
+    </section>
+
+    <!-- Thermometer -->
+    <section class="card" id="card-temp">
+      <h2>Temperature <code id="temp-id">temp_01</code></h2>
+      <svg viewBox="0 0 200 190">
+        <rect x="88" y="10" width="24" height="140" rx="12" fill="#18212c" stroke="#33465a" stroke-width="2"/>
+        <circle cx="100" cy="160" r="22" fill="#18212c" stroke="#33465a" stroke-width="2"/>
+        <rect id="temp-fill" x="94" y="140" width="12" height="20" rx="6" fill="var(--cyan)"/>
+        <circle id="temp-bulb" cx="100" cy="160" r="16" fill="var(--cyan)"/>
+        <g id="temp-ticks" font-size="9" fill="#7d8b99" font-family="Consolas, monospace"></g>
+      </svg>
+      <div class="readout"><span id="temp">24.0</span><small>°C</small></div>
+      <div class="sub" id="temp-sub">ambient</div>
+    </section>
+
+    <!-- Pressure gauge -->
+    <section class="card" id="card-pressure">
+      <h2>Pressure <code id="pressure-id">pressure_valve_B</code></h2>
+      <svg viewBox="0 0 200 190">
+        <circle cx="100" cy="105" r="80" fill="#18212c" stroke="#33465a" stroke-width="3"/>
+        <path id="gauge-red" fill="none" stroke="var(--red)" stroke-width="8"/>
+        <g id="gauge-ticks" stroke="#7d8b99" font-size="10" fill="#7d8b99" font-family="Consolas, monospace"></g>
+        <g id="needle" transform="rotate(-120 100 105)">
+          <path d="M97 105 L100 38 L103 105 Z" fill="var(--amber)"/>
+        </g>
+        <circle cx="100" cy="105" r="8" fill="#33465a"/>
+      </svg>
+      <div class="readout"><span id="pressure">1.00</span><small>bar</small></div>
+      <div class="sub">0 – 6 bar · red line 5</div>
+    </section>
+
+    <!-- Actuator -->
+    <section class="card" id="card-actuator">
+      <h2>Linear Actuator <code>emergency_stop</code></h2>
+      <svg viewBox="0 0 200 190">
+        <rect x="14" y="70" width="90" height="50" rx="6" fill="#18212c" stroke="#33465a" stroke-width="2"/>
+        <rect x="20" y="80" width="12" height="30" rx="2" fill="#2b3a4b"/>
+        <g id="rod">
+          <rect x="104" y="88" width="20" height="14" fill="#9fb3c8"/>
+          <rect id="rod-head" x="124" y="76" width="14" height="38" rx="3" fill="#c7d6e5"/>
+        </g>
+        <line x1="14" y1="140" x2="190" y2="140" stroke="#1f2a37" stroke-width="2" stroke-dasharray="4 4"/>
+        <circle id="act-led" cx="30" cy="40" r="7" fill="#334"/>
+        <text id="act-label" x="44" y="45" fill="#7d8b99" font-size="13" font-weight="700">IDLE</text>
+      </svg>
+      <div class="readout"><span id="stroke">0</span><small>% stroke</small></div>
+      <div class="sub">follows motor · halts on e-stop</div>
+    </section>
+  </div>
+
+  <div class="row2">
+    <section class="card" id="brain">
+      <h2>Big Brain · Tier 2 Diagnosis</h2>
+      <div id="brain-meta"></div>
+      <div id="brain-text" class="empty">No escalations yet.</div>
+    </section>
+    <section class="card">
+      <h2>Command Log</h2>
+      <ul id="log"><li class="empty">Waiting for terminal commands…</li></ul>
+    </section>
+  </div>
+</main>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  const TEMP_MIN = 0, TEMP_MAX = 120, P_MAX = 6;
+
+  let S;
+  function resetState() {
+    S = { targetRpm: 0, rpm: 0, estop: false, temp: 24, pressure: 1.0, phase: 0, stroke: 0, angle: 0 };
+    $("estop").classList.remove("on");
+    $("log").innerHTML = '<li class="empty">Waiting for terminal commands…</li>';
+    $("brain").classList.remove("active");
+    $("brain-meta").textContent = "";
+    $("brain-text").textContent = "No escalations yet.";
+    $("brain-text").className = "empty";
+  }
+
+  // ---------- static gauge decoration ----------
+  (function drawTicks() {
+    const tt = $("temp-ticks");
+    for (let t = 0; t <= TEMP_MAX; t += 20) {
+      const y = 140 - (t / TEMP_MAX) * 125;
+      tt.insertAdjacentHTML("beforeend",
+        `<line x1="114" x2="120" y1="${y}" y2="${y}" stroke="#7d8b99"/><text x="124" y="${y + 3}">${t}</text>`);
+    }
+    const gt = $("gauge-ticks");
+    for (let p = 0; p <= P_MAX; p++) {
+      const a = (-120 + (p / P_MAX) * 240) * Math.PI / 180;
+      const x1 = 100 + Math.sin(a) * 70, y1 = 105 - Math.cos(a) * 70;
+      const x2 = 100 + Math.sin(a) * 60, y2 = 105 - Math.cos(a) * 60;
+      const xt = 100 + Math.sin(a) * 48, yt = 105 - Math.cos(a) * 48 + 4;
+      gt.insertAdjacentHTML("beforeend",
+        `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke-width="2"/><text x="${xt}" y="${yt}" text-anchor="middle" stroke="none">${p}</text>`);
+    }
+    const arc = (v) => {
+      const a = (-120 + (v / P_MAX) * 240) * Math.PI / 180;
+      return [100 + Math.sin(a) * 74, 105 - Math.cos(a) * 74];
+    };
+    const [sx, sy] = arc(5), [ex, ey] = arc(6);
+    $("gauge-red").setAttribute("d", `M${sx} ${sy} A74 74 0 0 1 ${ex} ${ey}`);
+  })();
+
+  // ---------- physics + render loop ----------
+  function tempColor(t) {
+    const k = Math.min(1, Math.max(0, (t - 20) / 80));
+    return `hsl(${200 - k * 200}, 90%, 55%)`;
+  }
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.1, (now - last) / 1000);
+    last = now;
+
+    const target = S.estop ? 0 : S.targetRpm;
+    S.rpm += (target - S.rpm) * Math.min(1, dt * (S.estop ? 4 : 1.2));
+    if (Math.abs(S.rpm - target) < 0.5) S.rpm = target;
+    S.angle = (S.angle + S.rpm / 60 * 360 * dt * 0.08) % 360;
+
+    const tempTarget = 24 + S.rpm * 0.025;
+    S.temp += (tempTarget - S.temp) * dt * 0.25;
+    const pTarget = 1 + S.rpm * 0.0012;
+    S.pressure += (pTarget - S.pressure) * dt * 0.9;
+
+    const running = !S.estop && S.rpm > 30;
+    if (running) {
+      S.phase += dt * (0.6 + S.rpm / 1200);
+      S.stroke = (1 - Math.cos(S.phase)) / 2;
+    } else {
+      S.stroke += (0 - S.stroke) * Math.min(1, dt * 5);
+    }
+
+    // motor
+    $("rotor").setAttribute("transform", `rotate(${S.angle} 100 95)`);
+    const glow = Math.min(1, S.rpm / 3000);
+    $("motor-ring").setAttribute("opacity", 0.15 + glow * 0.85);
+    $("motor-ring").setAttribute("stroke", S.estop ? "var(--red)" : "var(--cyan)");
+    $("motor-led").setAttribute("fill", S.estop ? "var(--red)" : S.rpm > 1 ? "var(--green)" : "#334");
+    $("rpm").textContent = Math.round(S.rpm).toLocaleString();
+    $("rpm-target").textContent = (S.estop ? 0 : S.targetRpm).toLocaleString();
+
+    // thermometer
+    const h = Math.max(0, Math.min(1, (S.temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN))) * 125;
+    $("temp-fill").setAttribute("y", 150 - h - 10);
+    $("temp-fill").setAttribute("height", h + 20);
+    const tc = tempColor(S.temp);
+    $("temp-fill").setAttribute("fill", tc);
+    $("temp-bulb").setAttribute("fill", tc);
+    $("temp").textContent = S.temp.toFixed(1);
+    $("temp-sub").textContent = S.temp > 80 ? "⚠ hot" : S.temp > 45 ? "warm" : "ambient";
+
+    // pressure
+    $("needle").setAttribute("transform", `rotate(${-120 + Math.min(1, S.pressure / P_MAX) * 240} 100 105)`);
+    $("pressure").textContent = S.pressure.toFixed(2);
+
+    // actuator
+    $("rod").setAttribute("transform", `translate(${S.stroke * 48} 0)`);
+    $("stroke").textContent = Math.round(S.stroke * 100);
+    $("act-led").setAttribute("fill", S.estop ? "var(--red)" : running ? "var(--green)" : "#334");
+    $("act-label").textContent = S.estop ? "HALTED" : running ? "CYCLING" : "IDLE";
+    $("act-label").setAttribute("fill", S.estop ? "#ff4d5e" : running ? "#2fe08b" : "#7d8b99");
+
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- event handling ----------
+  function flash(id, red = false) {
+    const el = $(id);
+    const cls = red ? "flash-red" : "flash";
+    el.classList.remove("flash", "flash-red");
+    void el.offsetWidth; // restart animation
+    el.classList.add(cls);
+  }
+
+  function jitter(v, amt) { return v + (Math.random() - 0.5) * amt; }
+
+  function addLog(ev, resultText) {
+    const log = $("log");
+    if (log.firstElementChild && log.firstElementChild.classList.contains("empty")) log.innerHTML = "";
+    const li = document.createElement("li");
+    const t = document.createElement("time");
+    t.textContent = new Date(ev.ts * 1000).toLocaleTimeString();
+    const tier = document.createElement("span");
+    const isT1 = ev.type === "command";
+    tier.className = "tier " + (isT1 ? "t1" : "t2");
+    tier.textContent = isT1 ? "T1" : "T2";
+    const body = document.createElement("div");
+    const p = document.createElement("div");
+    p.className = "prompt";
+    p.textContent = ev.prompt;
+    const r = document.createElement("div");
+    r.className = "result";
+    r.textContent = `${resultText} · ${Math.round(ev.latency_ms)} ms`;
+    body.append(p, r);
+    li.append(t, tier, body);
+    log.prepend(li);
+  }
+
+  function handle(ev) {
+    const live = !ev.replay;
+    $("last-engine").textContent = `last: ${ev.tier} · ${ev.engine || "?"}`;
+
+    if (ev.type === "command") {
+      const cmd = ev.command || {};
+      if (cmd.tool === "emergency_stop") {
+        S.estop = true;
+        $("estop").classList.add("on");
+        if (live) ["card-motor", "card-temp", "card-pressure", "card-actuator"].forEach((id) => flash(id, true));
+        addLog(ev, `EMERGENCY STOP (${cmd.reason || "no reason"})`);
+      } else if (cmd.tool === "set_motor_speed") {
+        S.estop = false;
+        $("estop").classList.remove("on");
+        S.targetRpm = Math.max(0, Number(cmd.rpm) || 0);
+        if (live) flash("card-motor");
+        addLog(ev, `motor → ${S.targetRpm} RPM`);
+      } else if (cmd.tool === "read_sensor") {
+        const id = String(cmd.sensor_id || "");
+        if (/temp|therm/i.test(id)) {
+          $("temp-id").textContent = id;
+          if (live) flash("card-temp");
+          addLog(ev, `${id} = ${jitter(S.temp, 0.4).toFixed(1)} °C`);
+        } else if (/press|valve|bar/i.test(id)) {
+          $("pressure-id").textContent = id;
+          if (live) flash("card-pressure");
+          addLog(ev, `${id} = ${jitter(S.pressure, 0.03).toFixed(2)} bar`);
+        } else {
+          addLog(ev, `${id}: no such sensor on this panel`);
+        }
+      } else {
+        addLog(ev, `unknown tool ${cmd.tool}`);
+      }
+    } else if (ev.type === "escalation") {
+      $("brain").classList.add("active");
+      $("brain-meta").textContent = `${ev.engine || "Tier 2"} · ${Math.round(ev.latency_ms)} ms · ${ev.reason || ""}`;
+      $("brain-text").className = "";
+      $("brain-text").textContent = `> ${ev.prompt}\n\n${(ev.diagnosis || "").trim() || "No diagnosis returned."}`;
+      if (live) flash("brain");
+      addLog(ev, "escalated to Big Brain");
+    }
+  }
+
+  // ---------- live stream ----------
+  resetState();
+  requestAnimationFrame(frame);
+  const es = new EventSource("/events");
+  es.onopen = () => {
+    resetState(); // the server replays history on every (re)connect
+    $("conn").textContent = "live";
+    $("conn").className = "pill ok";
+  };
+  es.onerror = () => {
+    $("conn").textContent = "disconnected · retrying";
+    $("conn").className = "pill bad";
+  };
+  es.onmessage = (m) => handle(JSON.parse(m.data));
+</script>
+</body>
+</html>

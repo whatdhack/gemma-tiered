@@ -1,0 +1,17 @@
+# Model weights (multi-GB; download separately)
+models/
+*.gguf
+*.litertlm
+*.xnnpack_cache
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+._*
+.DS_Store
+Thumbs.db
+.vscode/
