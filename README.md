@@ -32,6 +32,18 @@ prompt
 
 Tier 1 never executes the tools. It returns a validated Pydantic command object. The router tracks simulated device state (motor setpoint, e-stop, sensor reads, recent commands), and that state is what Tier 2 reports and answers are based on. A question is never turned into a device action. Ollama calls time out after 90 s.
 
+## Safety limits
+
+Every report and answer is graded against default limits defined in `SAFETY_LIMITS` in `tiered_router.py`. A value at or above a limit trips that level:
+
+| Reading | Warning | Danger |
+|---|---|---|
+| Motor speed | 2800 RPM | 3200 RPM |
+| Temperature (`temp_01`) | 80 °C | 95 °C |
+| Pressure (`pressure_valve_B`) | 4.5 bar | 5.0 bar |
+
+Reports start with the verdict, for example *"All values normal"* or *"Danger: Temperature (temp_01) 96.3 °C over danger limit (95.0 °C)"*. A latched e-stop is reported as a warning, and a setpoint above a limit is flagged before the motor reaches it. Ask for a *brief* report ("give me a brief report") to get a one- or two-sentence summary. In the simulation, temperature reaches the 80 °C warning at about 2240 RPM.
+
 ## Setup
 
 **Requirements:** Windows, Python 3.12 and [Ollama](https://ollama.com).
@@ -71,6 +83,7 @@ Set primary motor to 1400 RPM
 Read sensor temp_01
 Emergency halt right now
 give me a status report
+give me a brief report
 is the motor steady? what is the rpm?
 Why is the conveyor belt slipping whenever torque demand exceeds 45Nm?
 ```

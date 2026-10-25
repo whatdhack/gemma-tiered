@@ -49,6 +49,22 @@ except ImportError:
 RAMP_RATE = 1.2
 RAMP_RATE_ESTOP = 4.0
 
+# Default safety limits (value >= limit trips that level). Temperature and pressure thresholds
+# match the device panel ("hot" above 80 °C, red line at 5 bar).
+SAFETY_LIMITS = {
+    "motor_rpm": {"label": "Motor speed", "unit": "RPM", "warning": 2800, "danger": 3200},
+    "temp_01_c": {"label": "Temperature (temp_01)", "unit": "°C", "warning": 80.0, "danger": 95.0},
+    "pressure_valve_B_bar": {"label": "Pressure (pressure_valve_B)", "unit": "bar", "warning": 4.5, "danger": 5.0},
+}
+
+
+def assess_value(name: str, value: float) -> Dict[str, Any]:
+    """Grade one reading against SAFETY_LIMITS: normal / warning / danger."""
+    lim = SAFETY_LIMITS[name]
+    status = "danger" if value >= lim["danger"] else "warning" if value >= lim["warning"] else "normal"
+    return {"value": value, "unit": lim["unit"], "status": status,
+            "warning_limit": lim["warning"], "danger_limit": lim["danger"]}
+
 
 # ============================================================================
 # Schemas & Data Models
@@ -335,14 +351,17 @@ class TieredRouter:
         estop = self.device_state["estop"]
         effective_setpoint = 0 if estop else setpoint
         current = self._motor_rpm_now()
-        at_setpoint = abs(current - effective_setpoint) <= max(5.0, 0.01 * effective_setpoint)
+        at_setpoint = abs(current - effective_setpoint) <= max(5.0, 0.02 * effective_setpoint)
         running = current > 5
+        current_shown = round(current if not at_setpoint else effective_setpoint)
+        temp = round(24 + current * 0.025, 1)
+        pressure = round(1 + current * 0.0012, 2)
         return {
             "overall": "E-STOP ENGAGED" if estop else ("RUNNING" if running else "IDLE"),
             "emergency_stop_latched": estop,
             "motor": {
                 "setpoint_rpm": setpoint,
-                "estimated_current_rpm": round(current if not at_setpoint else effective_setpoint),
+                "estimated_current_rpm": current_shown,
                 "at_setpoint": at_setpoint,
                 "ramping": not at_setpoint,
                 "running": running,
@@ -350,10 +369,11 @@ class TieredRouter:
             },
             "actuator": "halted" if estop else ("cycling" if current > 30 else "idle"),
             "estimated_readings": {
-                "temp_01_c": round(24 + current * 0.025, 1),
-                "pressure_valve_B_bar": round(1 + current * 0.0012, 2),
+                "temp_01_c": temp,
+                "pressure_valve_B_bar": pressure,
                 "note": "simulated estimates derived from motor speed; no live hardware attached"
             },
+            "safety_assessment": self._assess_safety(current_shown, setpoint, temp, pressure, estop),
             "sensor_read_counts": dict(self.device_state["sensor_reads"]),
             "recent_activity": self.event_log[-10:],
             "commands_handled": {
@@ -362,24 +382,69 @@ class TieredRouter:
             }
         }
 
+    @staticmethod
+    def _assess_safety(rpm: float, setpoint: int, temp: float, pressure: float, estop: bool) -> Dict[str, Any]:
+        """Grade current readings against SAFETY_LIMITS and produce a one-line verdict."""
+        checks = {
+            "motor_rpm": assess_value("motor_rpm", rpm),
+            "temp_01_c": assess_value("temp_01_c", temp),
+            "pressure_valve_B_bar": assess_value("pressure_valve_B_bar", pressure),
+        }
+        alerts = []
+        for name, c in checks.items():
+            if c["status"] != "normal":
+                limit = c[f"{c['status']}_limit"]
+                alerts.append({"level": c["status"], "message":
+                               f"{SAFETY_LIMITS[name]['label']} {c['value']} {c['unit']} over "
+                               f"{c['status']} limit ({limit} {c['unit']})"})
+        setpoint_status = assess_value("motor_rpm", setpoint)["status"]
+        if setpoint_status != "normal" and checks["motor_rpm"]["status"] == "normal" and not estop:
+            alerts.append({"level": setpoint_status, "message":
+                           f"Motor setpoint {setpoint} RPM over {setpoint_status} limit; "
+                           "speed will exceed it once ramped"})
+        if estop:
+            alerts.append({"level": "warning", "message": "Emergency stop is latched; all motion halted"})
+
+        levels = {a["level"] for a in alerts}
+        overall = "DANGER" if "danger" in levels else "WARNING" if levels else "ALL VALUES NORMAL"
+        if overall == "ALL VALUES NORMAL":
+            summary = "All values normal"
+        else:
+            summary = f"{overall.title()}: " + "; ".join(a["message"] for a in alerts)
+        return {"overall": overall, "summary": summary, "alerts": alerts, "checks": checks}
+
+    @staticmethod
+    def _brief_line(snap: Dict[str, Any]) -> str:
+        motor = snap["motor"]
+        est = snap["estimated_readings"]
+        if motor["at_setpoint"]:
+            ramp = ""
+        elif snap["emergency_stop_latched"]:
+            ramp = ", spinning down"
+        else:
+            ramp = f", ramping to {motor['setpoint_rpm']}"
+        return (f"{snap['safety_assessment']['summary']}. Motor ~{motor['estimated_current_rpm']} RPM{ramp}, "
+                f"temp_01 {est['temp_01_c']} °C, pressure_valve_B {est['pressure_valve_B_bar']} bar (simulated).")
+
     def _synthetic_report(self, snap: Dict[str, Any]) -> str:
         """Deterministic report built from the snapshot when Ollama is unavailable."""
         motor = snap["motor"]
         est = snap["estimated_readings"]
+        safety = snap["safety_assessment"]
         reads = ", ".join(f"{k} x{v}" for k, v in snap["sensor_read_counts"].items()) or "none"
         recent = "; ".join(f"{e['prompt']} -> {e['result']}" for e in snap["recent_activity"][-5:]) or "none"
 
         recs = []
-        if snap["emergency_stop_latched"]:
-            recs.append("Investigate the e-stop cause before resuming; command a motor speed to clear it.")
-        if motor["setpoint_rpm"] > 2000 and motor["running"]:
-            recs.append("Motor above 2000 RPM; monitor temp_01 for thermal drift.")
-        if est["temp_01_c"] > 80:
-            recs.append("Estimated temperature above 80 °C; reduce speed.")
+        for a in safety["alerts"]:
+            if "Emergency stop" in a["message"]:
+                recs.append("Investigate the e-stop cause before resuming; command a motor speed to clear it.")
+            else:
+                recs.append(f"{a['message']}; reduce motor speed.")
         if not recs:
-            recs.append("No action required.")
+            recs.append("None; all values within limits.")
 
         return (
+            f"Safety: {safety['summary']}\n"
             f"1. Overall Status: {snap['overall']}\n"
             f"2. Motor & Actuators: running at ~{motor['estimated_current_rpm']} RPM "
             f"(setpoint {motor['setpoint_rpm']} RPM, {'at setpoint' if motor['at_setpoint'] else 'ramping'}); "
@@ -394,20 +459,37 @@ class TieredRouter:
     def _tier2_report(self, prompt: str) -> Dict[str, Any]:
         """Tier 2 report mode: summarize current device state for the operator."""
         snap = self._status_snapshot()
-        system = (
-            "You are a plant operations assistant. Write a concise operator status report from the telemetry JSON. "
-            "Use exactly these sections: 1. Overall Status, 2. Motor & Actuators, 3. Sensors, 4. Recent Activity, "
-            "5. Recommendations. Use only facts present in the telemetry and say when something is unknown. "
-            "No preamble."
-        )
-        user = f"Request: {prompt}\n\nTelemetry:\n{json.dumps(snap, indent=2)}"
-        text, err = self._ollama_chat(system, user, num_predict=300)
+        brief = bool(re.search(r"\b(brief|short|quick|one[- ]line|tl;?dr)\b", prompt.lower()))
+        verdict = snap["safety_assessment"]["summary"]
+        if brief:
+            system = (
+                "You are a plant operations assistant. Write a 1-2 sentence status report from the telemetry JSON. "
+                f'Your first words must be exactly: "{verdict}." Then give the key values: motor speed '
+                "(mention the setpoint only if ramping), temperature and pressure, with units. "
+                "Note once that values are simulated. No preamble, no field names."
+            )
+            # Brief reports only need the essentials; a smaller prompt is much faster on local E4B
+            prompt_snap = {k: snap[k] for k in ("overall", "emergency_stop_latched", "motor", "estimated_readings")}
+        else:
+            system = (
+                "You are a plant operations assistant. Write a concise operator status report from the telemetry JSON. "
+                f'Your first line must be exactly: "Safety: {verdict}". Then use exactly these sections: '
+                "1. Overall Status, 2. Motor & Actuators, 3. Sensors, 4. Recent Activity, 5. Recommendations. "
+                "Judge normal vs abnormal only from safety_assessment, which applies the configured limits. "
+                "In Recommendations, give one concrete action per alert (e.g. reduce speed below the warning "
+                "limit), or write 'None; all values within limits.' if there are none. Use only facts present in "
+                "the telemetry. No preamble."
+            )
+            prompt_snap = snap
+        user = f"Request: {prompt}\n\nTelemetry:\n{json.dumps(prompt_snap, indent=2)}"
+        text, err = self._ollama_chat(system, user, num_predict=100 if brief else 300)
         if text:
             return {"engine": f"Ollama ({self.ollama_model})", "mode": "report", "report": text, "telemetry": snap}
+        fallback = self._brief_line(snap) if brief else self._synthetic_report(snap)
         return {
             "engine": "Tracked-State Report Builder (no model)",
             "mode": "report",
-            "report": f"Big Brain unavailable ({err}); report built from tracked state.\n\n{self._synthetic_report(snap)}",
+            "report": f"Big Brain unavailable ({err}); report built from tracked state.\n\n{fallback}",
             "telemetry": snap
         }
 
@@ -422,6 +504,8 @@ class TieredRouter:
             "ramping toward motor.setpoint_rpm.\n"
             "- Then 1-3 short sentences of context: whether the state is steady, anything noteworthy in recent "
             "activity, and a next step only if one is warranted.\n"
+            "- If the question is whether something is normal, safe or within limits, answer from "
+            "safety_assessment (it applies the configured warning and danger limits).\n"
             "- All readings come from a simulation with no live hardware; mention that once, briefly.\n"
             "- Never invent data that is not in the telemetry. No preamble, no quotation marks around values."
         )
